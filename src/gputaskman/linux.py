@@ -69,13 +69,22 @@ def _nvml_devices() -> list[tuple[int, object]]:
 
 
 def enumerate_adapters() -> list[Adapter]:
-    """NVIDIA GPUs through NVML, plus (native Linux only) AMD and Intel GPUs through DRM."""
+    """NVIDIA GPUs through NVML, plus (native Linux only) AMD and Intel GPUs through DRM,
+    and Huawei Ascend NPUs through npu-smi."""
     out = _nvml_adapters()
     if not is_wsl():
         from . import drm
 
         seen = {a.luid for a in out}
         out += [a for a in drm.adapters(drm.cards()) if a.luid not in seen]
+        # Ascend NPUs (no DRM): dual-chip cards yield one adapter per chip.
+        try:
+            from . import ascend
+
+            seen |= {a.luid for a in out}
+            out += [a for a in ascend.cached_chips_adapters() if a.luid not in seen]
+        except Exception:
+            pass  # no npu-smi: the backend is simply absent
     return out
 
 
@@ -235,6 +244,15 @@ class LinuxCounters:
 
             drm = DrmCounters()  # cheap: only lists cards; the Collector starts it if an AMD GPU is selected
             self.drm = drm if drm.ok else None
+        # Huawei Ascend NPUs (no DRM): npu-smi-based, own watch stream + slow proc-mem refresh.
+        self.ascend = None
+        if not self.wsl:
+            try:
+                from .ascend import AscendCounters
+
+                self.ascend = AscendCounters()
+            except Exception:
+                self.ascend = None
         if N is None:
             return
         try:
@@ -311,6 +329,10 @@ class LinuxCounters:
             drm_procs, drm_adapters = self.drm.sample()
             procs.update(drm_procs)
             adapters.update(drm_adapters)
+        if self.ascend is not None and self.ascend.ok:
+            asc_procs, asc_adapters = self.ascend.sample()
+            procs.update(asc_procs)
+            adapters.update(asc_adapters)
         return procs, adapters
 
     def _resolve_namespaces(self, procs: dict[int, dict[int, ProcGpu]]) -> None:

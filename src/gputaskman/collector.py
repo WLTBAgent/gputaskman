@@ -12,7 +12,7 @@ import psutil
 
 from .amdsmi import AmdSmi, _bdf
 from .adl import Adl
-from .dxgi import VENDOR_AMD, VENDOR_NVIDIA, Adapter
+from .dxgi import VENDOR_AMD, VENDOR_NVIDIA, VENDOR_HUAWEI, Adapter
 from .handy import HandyEvidence, inspect_handy
 from .llm import LlmView, ServerProber, api_key, build_view, gb, ollama_log_path
 from . import nvml as nvml_mod
@@ -120,8 +120,8 @@ class Snapshot:
     vram_used: int | None  # WDDM adapter-wide dedicated usage
     shared_used: int | None
     procs: list[ProcRow] = field(default_factory=list)
-    backend: str = "wddm"  # wddm (Windows) | nvml (native Linux, NVIDIA) | drm (native Linux, AMD or Intel) | wsl (device-wide only) | metal (macOS)
-    process_status: str = ""  # drm backend only: what the DRM process scan couldn't cover; empty when it saw everything
+    backend: str = "wddm"  # wddm (Windows) | nvml (native Linux, NVIDIA) | drm (native Linux, AMD/Intel) | ascend (Huawei NPU) | wsl (device-wide only) | metal (macOS)
+    process_status: str = ""  # amdgpu only: what the DRM process scan couldn't cover; empty when it saw everything
     host_status: str = ""  # WSL only: Windows host counters via interop -- ok | starting | off (...) | ...
     wsl_split: str = ""  # WSL only: why Linux rows have no (inferred) VRAM, when they don't
     # False on an APU (amdgpu iGPU): its GTT is ordinary GPU memory, not spill from a full VRAM.
@@ -199,9 +199,13 @@ class Collector:
     _mac_driver = ""  # "macOS 26.3.1" on the metal backend, read once at startup
     SCAN_BUDGET = 0.15  # seconds of memory-map scanning per sample; leftovers wait for the next sample
     drm_card = None  # the selected GPU's AMD or Intel card, when it is one (drm.DrmCard)
+    ascend = None  # AscendCounters, when LinuxCounters owns one (shared watch stream)
+    ascend_chip = None  # the selected GPU's Ascend chip, when it is one (ascend.AscendChip)
 
     @property
     def backend(self) -> str:
+        if self.ascend_chip is not None:
+            return "ascend"  # Huawei NPU: npu-smi is the source, not NVML/DRM
         return "drm" if self.drm_card is not None else BACKEND
 
     def __init__(self, gpu_index: int = 0, scan_budget: float | None = SCAN_BUDGET, host: bool = True,
@@ -230,6 +234,18 @@ class Collector:
             drm.start()  # engine baseline over every process
             if scan_budget is None:
                 drm.scan_budget = None  # one-shot output sees every process
+        # Huawei Ascend NPU (no DRM): per-chip processes from npu-smi, live metrics from a
+        # `npu-smi info watch` stream. Owned by LinuxCounters (one watch stream for all chips).
+        self.ascend_chip = None
+        self.ascend = None
+        if (BACKEND == "posix" or sys.platform == "linux") and self.adapter \
+                and self.adapter.vendor_id == VENDOR_HUAWEI:
+            asc = getattr(self.counters, "ascend", None)
+            if asc is not None and asc.ok:
+                self.ascend = asc
+                self.ascend_chip = next(
+                    (c for c in asc.chips
+                     if (asc.chip_key(c.pdev) << 8) | c.chip == self.adapter.luid), None)
         self.inspector = ProcInspector()
         self.prober = ServerProber()
         self.scan_budget = scan_budget  # None = scan every candidate now (one-shot output)
@@ -313,6 +329,8 @@ class Collector:
         elif self.adapter and self.adapter.vendor_id != VENDOR_NVIDIA:
             # NVML can't describe this GPU, and a sweep of every NVIDIA device costs ~60 ms per device.
             nv = (self.adl.sample() or self.amdsmi.sample()) if self.adapter.vendor_id == VENDOR_AMD else None
+        elif self.ascend_chip is not None:
+            nv = self.ascend.read_device(self.ascend_chip, self.gpu_index)
         else:
             nvs = self.nvml.sample() if self.nvml.ok else []
             nv = select_nv_device(self.adapter, nvs, self.gpu_index, self.adapters)

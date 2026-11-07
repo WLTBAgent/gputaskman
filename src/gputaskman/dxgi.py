@@ -33,7 +33,9 @@ class _GUID(ctypes.Structure):
 _IID_IDXGIFactory1 = _GUID(0x770AAE78, 0xF26F, 0x4DBA, (ctypes.c_ubyte * 8)(0xA8, 0x29, 0x25, 0x3C, 0x83, 0xD1, 0xB3, 0x87))
 VENDOR_NVIDIA = 0x10DE
 VENDOR_AMD = 0x1002
-VENDORS = {0x10DE: "NVIDIA", 0x1002: "AMD", 0x8086: "Intel", 0x1414: "Microsoft", 0x5143: "Qualcomm"}
+VENDOR_HUAWEI = 0x19E5  # Ascend NPUs (telemetry via npu-smi, not DRM)
+VENDORS = {0x10DE: "NVIDIA", 0x1002: "AMD", 0x8086: "Intel", 0x19E5: "Ascend",
+           0x1414: "Microsoft", 0x5143: "Qualcomm"}
 
 
 @dataclass
