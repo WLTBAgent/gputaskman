@@ -352,7 +352,7 @@ class Collector:
             if self.drm_card.intel and nv is not None:
                 from .drm import intel_counter_status
 
-                snap.counter_status = intel_counter_status(self.drm_card)
+                snap.counter_status = intel_counter_status(self.drm_card, nv)
         live = [(pid, g) for pid, g in procs.items() if _is_live(g)]
         live.sort(key=lambda x: -(x[1].shown_vram or 0))
         for pid, g in live:
