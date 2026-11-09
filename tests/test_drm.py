@@ -1750,7 +1750,7 @@ class IntelCounterStatusTests(unittest.TestCase):
         self.assertIn("performance counters", status)
         self.assertIn("uncore", status)
 
-    def test_hwmon_power_needs_no_rapal_reason(self):
+    def test_hwmon_power_needs_no_rapl_reason(self):
         # A discrete card's hwmon sensor already answered: RAPL was never needed, so its
         # failure must not be reported. (start() primes RAPL only for integrated cards.)
         drm._INTEL_RAPL_FAIL = "denied"
@@ -1760,7 +1760,7 @@ class IntelCounterStatusTests(unittest.TestCase):
     def test_all_present_is_silent(self):
         self.assertEqual(drm.intel_counter_status(self._card(), None), "")
 
-    def test_discrete_card_omits_rapal(self):
+    def test_discrete_card_omits_rapl(self):
         drm._INTEL_PMU_STATE["/x/card1/device"] = {"fail": "denied"}
         drm._INTEL_RAPL_FAIL = "denied"
         with patch.object(drm, "_read", return_value="2"):
