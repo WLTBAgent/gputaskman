@@ -1497,6 +1497,22 @@ class IntelScanTests(unittest.TestCase):
             self.assertEqual(adapters[disc.key].dedicated, 64 * MiB)
             self.assertEqual(adapters[igpu.key].dedicated, 60 * MiB)
 
+    def test_start_arms_device_wide_baselines(self):
+        # --once sleeps a second after Collector init, so the primed baselines make its
+        # single sample a rate over a real interval instead of a first-sample N/A.
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = Path(tmp) / "proc"
+            proc.mkdir()
+            card = drm.DrmCard(key=32, pdev="0000:00:02.0", sysfs=str(Path(tmp) / "card0" / "device"),
+                               driver="i915", vendor_id=0x8086, device_id=0xA7AD, name="Intel Intel Graphics",
+                               vram_total=0, integrated=True, intel=True)
+            counters = drm.DrmCounters(found=[card], proc=str(proc), clock=Clock())
+            with patch.object(drm, "_intel_pmu_rates") as pmu, \
+                    patch.object(drm, "_intel_rapl_w") as rapl:
+                counters.start()
+            pmu.assert_called_once_with(card.sysfs)
+            rapl.assert_called_once_with()
+
     def test_device_used_sums_each_client_once_and_is_unknown_when_incomplete(self):
         with tempfile.TemporaryDirectory() as tmp:
             card, proc, counters = self._setup(tmp)

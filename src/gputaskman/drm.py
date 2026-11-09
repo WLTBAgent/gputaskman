@@ -859,6 +859,13 @@ class DrmCounters:
         budget, self.scan_budget = self.scan_budget, None
         self.sample()
         self.scan_budget = budget
+        for card in self.cards:
+            if card.intel:
+                # Arm the device-wide baselines too: --once sleeps a second after Collector init,
+                # so its single sample is already a rate over a real interval.
+                _intel_pmu_rates(card.sysfs)
+                if card.integrated:
+                    _intel_rapl_w()
 
     def _adapters(self) -> dict[int, AdapterGpu]:
         out: dict[int, AdapterGpu] = {}
