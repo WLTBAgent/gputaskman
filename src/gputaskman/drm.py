@@ -10,8 +10,12 @@ counter, and have no per-process or device-wide memory sysfs beyond a discrete c
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import os
+import platform
 import re
+import struct
 import time
 from bisect import bisect_left
 from dataclasses import dataclass
@@ -516,6 +520,15 @@ def read_device(card: DrmCard, index: int) -> DeviceTelemetry:
             dev.gfx_clock = cur
         dev.sm_clock_max = _int(os.path.join(gt, "rps_RP0_freq_mhz"))
         dev.throttle = _intel_throttle(gt)
+        util, video = _intel_pmu_rates(d)
+        dev.util_gpu = util
+        dev.video = video
+        if dev.power_w is None and card.integrated:
+            # No hwmon energy either: RAPL's uncore zone is the integrated GPU's power.
+            # A discrete card keeps N/A here (uncore is not its power).
+            dev.power_w = _intel_rapl_w()
+            if dev.power_w is not None:
+                dev.power_kind = "RAPL uncore"
         # sysfs current_link_* on i915/xe can report the power-on default instead of the live link
         # (2.5 GT/s x1 shown while a measured DMA transfer ran at ~19 GB/s), so both stay unset:
         # unknown beats a confidently wrong number.
@@ -560,6 +573,210 @@ def _intel_power_w(hwmon: str) -> float | None:
 
 
 _INTEL_ENERGY_STATE: dict[str, tuple[int, float]] = {}  # hwmon path -> (last uJ, last read time); per card
+
+
+# Whole-GPU load and power for Intel (i915) need privileges a normal user lacks, so they live apart
+# from the sysfs readings above: the i915 performance counters (engine busy time) via perf_event_open
+# and GPU power via RAPL's uncore energy zone. File descriptors stay open for the process's life
+# (like Adl/NVML handles); the previous readings sit beside them. A card whose counters can never be
+# opened records why ("denied" or "missing") instead of retrying a failing syscall every refresh.
+_PERF_NR = {"x86_64": 298, "aarch64": 241}  # __NR_perf_event_open
+_INTEL_PMU_ENGINES = (("render", "rcs0-busy"), ("copy", "bcs0-busy"),
+                      ("video", "vcs0-busy"), ("video-enhance", "vecs0-busy"))
+_INTEL_PMU_STATE: dict[str, dict] = {}  # card sysfs dir -> {"fds", "prev", "fail"}
+_INTEL_RAPL_STATE: dict[str, dict] = {}  # energy_uj path -> {"max", "prev", "fail"}
+
+_LIBC = ctypes.CDLL(None, use_errno=True)
+_LIBC.syscall.restype = ctypes.c_long
+
+
+def _perf_open(pmu_type: int, config: int, cpu: int) -> int | None:
+    """One system-wide perf counter fd, or None. The explicit c_long wrappers matter: plain ints
+    would cross the variadic call boundary as 32-bit values."""
+    nr = _PERF_NR.get(platform.machine())
+    if nr is None:
+        return None
+    attr = ctypes.create_string_buffer(64)  # PERF_ATTR_SIZE_VER0: type/size/config is all counting needs
+    struct.pack_into("IIQ", attr, 0, pmu_type, 64, config)
+    fd = _LIBC.syscall(ctypes.c_long(nr), attr, ctypes.c_long(-1),
+                       ctypes.c_long(cpu), ctypes.c_long(-1), ctypes.c_ulong(0))
+    return fd if fd >= 0 else None
+
+
+def _intel_pmu_spec(pmu_root: str = "/sys/bus/event_source/devices/i915") -> tuple[int, int, dict[str, int]] | None:
+    """(PMU type, CPU, {engine kind: event config}) from the i915 PMU in sysfs; None when absent."""
+    root = pmu_root
+    pmu_type = _int(os.path.join(root, "type"))
+    mask = _read(os.path.join(root, "cpumask"))
+    if pmu_type is None or not mask:
+        return None
+    try:
+        cpu = int(re.split(r"[-,]", mask.strip())[0])
+    except ValueError:
+        return None
+    configs = {}
+    for kind, event in _INTEL_PMU_ENGINES:
+        value = _read(os.path.join(root, "events", event))
+        if not value or "=" not in value:
+            continue
+        try:
+            configs[kind] = int(value.split("=", 1)[1].strip(), 16)
+        except ValueError:
+            continue
+    return (pmu_type, cpu, configs) if configs else None
+
+
+def _read_counter(fd: int) -> int | None:
+    """One 64-bit perf counter value; None when it can't be read."""
+    try:
+        return struct.unpack("Q", os.read(fd, 8))[0]
+    except (OSError, struct.error):
+        return None
+
+
+def _intel_pmu_rates(sysfs: str, now: int | None = None) -> tuple[float | None, float | None]:
+    """Whole-GPU busy % (busiest engine) and video-engine busy % for an Intel card; (None, None) when
+    unreadable. The first sample only arms the baseline (a rate needs an interval); a counter stepping
+    back re-arms it instead of reporting a negative load."""
+    if now is None:
+        now = time.monotonic_ns()
+    state = _INTEL_PMU_STATE.get(sysfs)
+    if state is None:
+        state = {"fds": {}, "prev": {}, "fail": None}
+        _INTEL_PMU_STATE[sysfs] = state
+        spec = _intel_pmu_spec()
+        if spec is None:
+            state["fail"] = "missing"
+            return None, None
+        pmu_type, cpu, configs = spec
+        for kind, config in configs.items():
+            fd = _perf_open(pmu_type, config, cpu)
+            if fd is None:
+                for open_fd in state["fds"].values():
+                    os.close(open_fd)
+                state["fds"] = {}
+                err = ctypes.get_errno()
+                state["fail"] = "denied" if err in (errno.EACCES, errno.EPERM) else "missing"
+                return None, None
+            state["fds"][kind] = fd
+        if not state["fds"]:
+            state["fail"] = "missing"
+            return None, None
+    if state["fail"] or not state["fds"]:
+        return None, None
+    busy: dict[str, float] = {}
+    for kind, fd in state["fds"].items():
+        value = _read_counter(fd)
+        if value is None:
+            for open_fd in state["fds"].values():
+                try:
+                    os.close(open_fd)
+                except OSError:
+                    pass
+            del _INTEL_PMU_STATE[sysfs]  # transient: a fresh attempt next sample
+            return None, None
+        prev = state["prev"].get(kind)
+        state["prev"][kind] = (value, now)
+        if prev is None:
+            continue  # first sample arms the baseline
+        delta, elapsed = value - prev[0], now - prev[1]
+        if elapsed <= 0 or delta < 0:
+            continue  # torn read or stepped-back counter: unknown, not a negative load
+        busy[kind] = delta * 100.0 / elapsed
+    if not busy:
+        return None, None
+    video = max([v for k, v in busy.items() if k in ("video", "video-enhance")], default=None)
+    util = max(busy.values(), default=None)
+    return util, video
+
+
+def _intel_rapl_zone(powercap_root: str = "/sys/class/powercap") -> tuple[str, int | None] | None:
+    """(energy_uj path, max range or None) of the first package's uncore zone; None when absent."""
+    try:
+        roots = sorted(os.listdir(powercap_root))
+    except OSError:
+        return None
+    for root in roots:
+        if not re.fullmatch(r"intel-rapl:\d+", root):
+            continue
+        package = os.path.join(powercap_root, root)
+        try:
+            children = sorted(os.listdir(package))
+        except OSError:
+            continue
+        for child in children:
+            zone = os.path.join(package, child)
+            if _read(os.path.join(zone, "name")) == "uncore":
+                energy = os.path.join(zone, "energy_uj")
+                if os.path.exists(energy):
+                    return energy, _int(os.path.join(zone, "max_energy_range_uj"))
+    return None
+
+
+def _intel_rapl_w(now: float | None = None) -> float | None:
+    """GPU (uncore) power in watts from RAPL's cumulative energy counter; None when unreadable.
+
+    The first sample only arms the baseline. A wrapped counter adds its range (unknown range with a
+    wrapped counter is unknown, not a negative power draw)."""
+    if now is None:
+        now = time.perf_counter()
+    zone = _intel_rapl_zone()
+    if zone is None:
+        return None
+    energy_path, max_range = zone
+    state = _INTEL_RAPL_STATE.get(energy_path)
+    if state is None:
+        state = {"prev": None, "fail": None}
+        _INTEL_RAPL_STATE[energy_path] = state
+    try:
+        with open(energy_path, encoding="utf-8") as f:
+            energy = int(f.read().strip())
+    except (OSError, ValueError):
+        try:
+            with open(energy_path, encoding="utf-8") as f:
+                f.read(1)
+            state["fail"] = "missing"  # readable but unparseable: a broken counter, not denial
+        except OSError as err:
+            state["fail"] = "denied" if err.errno in (errno.EACCES, errno.EPERM) else "missing"
+        return None
+    prev = state["prev"]
+    state["prev"] = (energy, now)
+    if prev is None:
+        return None
+    delta, seconds = energy - prev[0], now - prev[1]
+    if seconds <= 0:
+        return None
+    if delta < 0:
+        if max_range is None:
+            return None
+        delta += max_range
+    return delta / 1e6 / seconds if delta >= 0 else None
+
+
+def intel_counter_status(card: DrmCard) -> str:
+    """Why Intel whole-GPU load, video load or power are N/A, for Snapshot.counter_status; "" when
+    all present (or not Intel). Unknown stays explained, never a bare blank."""
+    if not card.intel:
+        return ""
+    pmu_fail = _INTEL_PMU_STATE.get(card.sysfs, {}).get("fail")
+    states = [s for s in _INTEL_RAPL_STATE.values()]
+    rapl_fail = states[0]["fail"] if states else None
+    if pmu_fail is None and rapl_fail is None:
+        return ""
+    parts = []
+    if pmu_fail == "denied":
+        para = _read("/proc/sys/kernel/perf_event_paranoid") or "?"
+        parts.append(f"GPU and video load need perf privileges this user lacks (perf_event_paranoid={para})")
+    elif pmu_fail == "missing":
+        parts.append("no i915 performance counters on this kernel")
+    if card.integrated:
+        if rapl_fail == "denied":
+            parts.append("GPU power needs root (RAPL energy is root-only)")
+        elif rapl_fail == "missing":
+            parts.append("no RAPL uncore zone found")
+    if not parts:
+        return ""
+    return "Intel device metrics unavailable: " + "; ".join(parts) + ". N/A is unknown, not zero."
 
 
 def _vcn_major(device: str) -> int:
