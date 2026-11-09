@@ -273,10 +273,10 @@ reference and the engine percentages are still measured.
 
 Live check of the root-only readings on the same machine (`intel_gpu_top` from intel-gpu-tools as reference,
 `perf_event_paranoid=2`): under `vkmark` load the header's GPU % reads 48-95% against `intel_gpu_top` Render
-51-92% across scenes, and power reads 0.4 W idle against its 0.4 W (9.0 W under load against 6.5-6.8 W in a
-nearby window; scenes vary). A VA-API `ffmpeg` decode loop drives the video engine to 99.9% on both
-(`intel_gpu_top` Video 99.4-99.9%). Without root the three stay `N/A` with a reason, while the GT clock,
-throttle and per-process rows keep working.
+51-92% across scenes, and power reads 0.4 W idle against its 0.4 W (under load 9.0 W against 6.5-6.8 W in a
+nearby window; scenes vary, and uncore is approximate while the CPU is active). A VA-API `ffmpeg` decode loop
+drives the video engine to 99.9% on both (`intel_gpu_top` Video 99.4-99.9%). Without root the three stay `N/A`
+with a reason, while the GT clock, throttle and per-process rows keep working.
 
 **WSL** is different, because Windows owns the GPU. Linux cannot see how much VRAM its own
 processes use: `nvidia-smi` lists no processes, NVML's per-process samples carry *Windows* PIDs

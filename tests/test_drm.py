@@ -1752,7 +1752,7 @@ class IntelCounterStatusTests(unittest.TestCase):
 
     def test_hwmon_power_needs_no_rapal_reason(self):
         # A discrete card's hwmon sensor already answered: RAPL was never needed, so its
-        # failure (cached from the unconditional start() priming) must not be reported.
+        # failure must not be reported. (start() primes RAPL only for integrated cards.)
         drm._INTEL_RAPL_FAIL = "denied"
         nv = SimpleNamespace(power_kind="Board")
         self.assertEqual(drm.intel_counter_status(self._card(), nv), "")

@@ -870,6 +870,9 @@ class DrmCounters:
         self.sample()
         self.scan_budget = budget
         intel_cards = [c for c in self.cards if c.intel]
+        for card in intel_cards:
+            if card.integrated:
+                _intel_rapl_w()  # arm the power baseline; RAPL is package-global, unaffected by sharing
         if len(intel_cards) > 1:
             # One i915 PMU for the whole driver: its counters can't be attributed to either card,
             # so neither gets device load instead of both showing the same numbers.
@@ -877,12 +880,9 @@ class DrmCounters:
                 _INTEL_PMU_STATE.setdefault(card.sysfs, {"fds": {}, "prev": {}, "fail": "shared"})
             return
         for card in intel_cards:
-            if card.intel:
-                # Arm the device-wide baselines too: --once sleeps a second after Collector init,
-                # so its single sample is already a rate over a real interval.
-                _intel_pmu_rates(card.sysfs)
-                if card.integrated:
-                    _intel_rapl_w()
+            # Arm the load baseline too: --once sleeps a second after Collector init,
+            # so its single sample is already a rate over a real interval.
+            _intel_pmu_rates(card.sysfs)
 
     def _adapters(self) -> dict[int, AdapterGpu]:
         out: dict[int, AdapterGpu] = {}
