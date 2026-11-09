@@ -245,15 +245,17 @@ covered by unit tests only and **not yet validated on AMD hardware**.
 
 | | Source |
 |---|---|
-| Device temperature, power, GT clock, throttle | `hwmon` and `gt/gt0` under `/sys/class/drm/card*`. Power is the rate of the cumulative energy counter between two refreshes, so it is `n/a` on the first. The GT clock is the actual frequency (`rps_act_freq_mhz`, the requested one as fallback); throttle reasons come from `throttle_reason_*`. Without a GPU temperature sensor, an integrated GPU falls back to the CPU package sensor (`coretemp`), labelled as shared with the CPU |
+| Device temperature, power, GT clock, throttle, load and video | `hwmon`, `gt/gt0`, the i915 performance counters and RAPL's uncore zone. Power is the rate of the cumulative energy counter between two refreshes, so it is `n/a` on the first: the hwmon counter on a discrete card, the uncore RAPL zone on an integrated GPU (root-only). Without a GPU temperature sensor, an integrated GPU falls back to the CPU package sensor (`coretemp`), labelled as shared with the CPU. The GT clock is the actual frequency (`rps_act_freq_mhz`, the requested one as fallback); throttle reasons come from `throttle_reason_*`. GPU % is the busiest engine's busy share from the performance counters and video is the video engine's share (unified decode+encode, so `enc`/`dec` stay unset); both need root (`perf_event_paranoid=2` here blocks normal users), otherwise `N/A` with a reason |
 | Device VRAM total | The size of the local-memory PCI window (`resource2`), an **estimate**: kernel-owned memory is missing from the sysfs view, resizable BAR rounds to a power of two, and a partial window can be smaller than the card, so the total can differ from the card's memory. A window under 1 GiB (an integrated GPU, or a discrete card without resizable BAR) shows `N/A` (`null` in JSON). Free memory is never shown for Intel |
 | Device VRAM used | The sum of its clients' resident memory: i915 has no device-wide counter, so buffers shared between processes can be counted twice, and kernel-owned memory and processes gputaskman can't inspect are missing. Local memory on a discrete card, system memory on an integrated GPU. The UI, `--once`, `--json` (`memory_note`) and `gputaskman diff` all say so. `n/a` when any client's memory is unknown |
 | Integrated or discrete | An iGPU has no `local0`, so a card with a local-memory window of 1 GiB or more is discrete, and so is any card whose fdinfo reports local memory, even when its window is smaller |
 | Per-process VRAM and SPILL | `drm-resident-local0` and `drm-resident-system0`, plus their `stolen-` regions (the firmware-reserved part of each), under the same private-client rules as AMD. On an integrated GPU there is no local memory: a provably private client's `system0` bytes are its GPU memory in the VRAM column, and SPILL stays `N/A` (system memory is its memory, not spill). On a discrete card `system0` is memory the GPU's buffers currently sit in, including buffers placed there on purpose, so SPILL there (like AMD's GTT) is where they are, not proof they were pushed out of VRAM. The shared gate needs only the regions the device has, so a discrete card with a missing `drm-shared-local0` still shows `n/a` (`legacy`), while an integrated client with shared buffers shows `n/a` (`shared_buffers`). A region value that can't be parsed makes that figure `n/a`, not a smaller number |
 | Per-process engine load (3d, compute, copy, video) | `drm-engine-render`, `-compute`, `-copy`, `-video`, `-video-enhance` busy time, sampled twice. `n/a` where the driver reports none (before Gen 8). A class with several identical engines (`drm-engine-capacity-*`, such as video on an Arc) is not divided by its capacity, so one busy engine reads 100% |
 
-Device GPU load, memory bandwidth, and the PCIe link are `n/a`: i915 has no device-wide busy counter, and its
-sysfs link fields can report the power-on default instead of the live link.
+Device memory bandwidth and the PCIe link are `n/a`: i915 has no device-wide bandwidth counter, and its
+sysfs link fields can report the power-on default instead of the live link. Device GPU load and video load
+come from the i915 performance counters and need root; power comes from RAPL's uncore zone on an integrated
+GPU and needs root too.
 `xe` cards are detected, but its fdinfo uses other keys (`drm-cycles-*`, `drm-resident-vram0`/`-gtt`), so its
 per-process rows show `n/a` until they are decoded on hardware.
 
@@ -268,6 +270,13 @@ the card is found and named, the header shows the actual GT clock (`GT 300/1250 
 and a headless `vkmark` run shows as a 3D/game Vulkan row at 82% GPU. Per-process memory stays `n/a`
 (`shared_buffers`): the compositor imports every window, so no client is provably private. The `gtt_resident_bytes`
 reference and the engine percentages are still measured.
+
+Live check of the root-only readings on the same machine (`intel_gpu_top` from intel-gpu-tools as reference,
+`perf_event_paranoid=2`): under `vkmark` load the header's GPU % reads 48-95% against `intel_gpu_top` Render
+51-92% across scenes, and power reads 0.4 W idle against its 0.4 W (9.0 W under load against 6.5-6.8 W in a
+nearby window; scenes vary). A VA-API `ffmpeg` decode loop drives the video engine to 99.9% on both
+(`intel_gpu_top` Video 99.4-99.9%). Without root the three stay `N/A` with a reason, while the GT clock,
+throttle and per-process rows keep working.
 
 **WSL** is different, because Windows owns the GPU. Linux cannot see how much VRAM its own
 processes use: `nvidia-smi` lists no processes, NVML's per-process samples carry *Windows* PIDs
@@ -855,6 +864,7 @@ Identification is designed to stay cheap. Measured on one Windows machine:
 | vLLM `/v1/models` | 1.32 ms median, 21.36 ms max in 30 loopback fixture GETs; cached lookup ~0.0004 ms (Windows 11 build 28000, ARM64; no vLLM runtime/GPU workload) | One GET, 0.5 s timeout and 4 MiB response cap; success cached 3 s, misses/401 cached 30 s. No redirects; actual Linux/vLLM latency unmeasured |
 | `psutil.open_files()` | 0.6-2.5 s per process | Never |
 | AMD and Intel on Linux: DRM fdinfo scan (`readlink` every fd, read fdinfo of `/dev/dri` ones) | ~9 ms for ~8,000 fds (AMD, Linux desktop; Intel not measured) | Every refresh, only when an amdgpu or Intel card is shown; listing fds is bounded to 50 ms in the TUI and resumes next refresh, known GPU fds are still read |
+| Intel on Linux: performance counters + RAPL uncore (root only) | ~0.04 ms for the counters, ~0.11 ms for RAPL per refresh on the Vivobook (30 reads each) | Every refresh, only when an Intel card is shown and the counters opened; first refresh arms the baselines |
 | macOS: `ioreg` device stats + Metal clients | ~10 ms | Every refresh |
 | macOS: memory-map scan (`proc_pidinfo` region walk) | ~4 ms per process | Same policy as the memory-map scan above |
 | macOS: `footprint` GPU memory | ~70 ms per process, background thread | Busy and new processes every ~2 s, idle ones every 30 s (54 runs in 40 s with 27 GPU processes, M4 Mac mini) |
