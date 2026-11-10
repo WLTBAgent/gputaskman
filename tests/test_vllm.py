@@ -91,6 +91,49 @@ def chain(details, parents):
 
 
 class VllmTests(unittest.TestCase):
+    def test_vllm_topology_flags_are_value_aware(self):
+        # vllm/engine/arg_utils.py aliases (-dp, -n, -r, -tp, -pp); vllm/utils/argparse_utils.py
+        # FlexibleArgumentParser maps underscores to dashes and keeps argparse prefix matching.
+        allowed = [
+            [],
+            ["--data-parallel-size", "1"], ["--data-parallel-size=1"], ["-dp", "1"], ["-dp=1"],
+            ["--api-server-count", "1"], ["--api-server-count=1"],
+            ["--distributed-executor-backend", "mp"], ["--distributed-executor-backend=mp"],
+            ["--nnodes", "1"], ["--nnodes=1"], ["-n", "1"], ["-n=1"],
+            ["--data_parallel_size", "1"], ["--api_server_count=1"], ["--distributed_executor_backend", "mp"],
+            ["--tensor-parallel-size", "2"], ["-tp", "2"],
+            # PP is intentionally unchanged pending maintainer guidance.
+            ["--pipeline-parallel-size", "2"], ["-pp", "2"],
+            ["--data-parallel-size=1", "--api-server-count=1", "--distributed-executor-backend=mp"],
+        ]
+        rejected = [
+            ["--data-parallel-size", "2"], ["--data-parallel-size=2"], ["-dp", "2"], ["-dp=2"],
+            ["-dp2"], ["-dpn", "0"], ["-dpl", "2"],
+            ["--data-parallel-rank", "0"], ["--data-parallel-size-local", "1"],
+            ["--data-parallel-external-lb"],
+            ["--api-server-count", "2"], ["--api-server-count=0"],
+            ["--distributed-executor-backend", "ray"],
+            ["--distributed-executor-backend=external_launcher"],
+            ["--nnodes", "2"], ["--nnodes=2"], ["-n", "2"], ["-n2"],
+            ["--node-rank", "0"], ["--node-rank=0"], ["-r", "0"], ["-r0"],
+            ["--headless"], ["--config", "launch.yaml"], ["--config=launch.yaml"],
+            ["--data_parallel_size", "2"], ["--api_server_count=2"], ["--distributed_executor_backend", "ray"],
+            ["--node_rank", "0"], ["--data_parallel_rank=0"],
+            ["--api-server", "2"], ["--nnode", "2"], ["--distributed-executor", "ray"], ["--head"],
+            ["--conf", "launch.yaml"], ["--node-r", "0"],
+            ["--data-parallel-size"], ["-dp"], ["--api-server-count"],
+            ["--distributed-executor-backend"], ["--nnodes"],
+            ["--data-parallel-size", "--api-server-count", "1"],
+            ["--data-parallel-size=1", "--config", "launch.yaml"],
+            ["-dp", "2", "--api-server-count", "1"],
+        ]
+        for args in allowed:
+            with self.subTest(allowed=args):
+                self.assertFalse(ProcDetail(10, "python", cmdline=LAUNCH + args).vllm_ambiguous)
+        for args in rejected:
+            with self.subTest(rejected=args):
+                self.assertTrue(ProcDetail(10, "python", cmdline=LAUNCH + args).vllm_ambiguous)
+
     def test_signatures_are_hints_even_without_mapped_models_or_titles(self):
         cases = [
             ("vllm", LAUNCH, "server"),
