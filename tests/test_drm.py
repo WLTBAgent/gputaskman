@@ -1580,7 +1580,6 @@ class IntelPmuTests(unittest.TestCase):
                 drm._intel_pmu_rates("/x/card1/device", now=0)
                 self.assertEqual(drm._intel_pmu_rates("/x/card1/device", now=1_000_000_000), (80.0, 80.0))
 
-    @unittest.skipIf(sys.platform == "win32", "powercap sysfs names contain a colon")
     def test_stepped_back_counter_re_arms(self):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.object(drm, "_intel_pmu_spec", return_value=(28, 0, {"render": 0})), \
@@ -1681,6 +1680,7 @@ class IntelRaplTests(unittest.TestCase):
                 Path(energy).write_text("6000000\n")  # 5 J in 1 s
                 self.assertAlmostEqual(drm._intel_rapl_w(now=1.0), 5.0)
 
+    @unittest.skipIf(sys.platform == "win32", "powercap sysfs names contain a colon")
     def test_stepped_back_counter_re_arms(self):
         with tempfile.TemporaryDirectory() as tmp:
             energy = self._zone(Path(tmp))
@@ -1697,14 +1697,11 @@ class IntelRaplTests(unittest.TestCase):
             self.assertEqual(drm._INTEL_RAPL_FAIL, "missing")
 
     def test_unreadable_zone_reports_denied(self):
-        if os.geteuid() == 0:
-            self.skipTest("root bypasses file permissions")
-        with tempfile.TemporaryDirectory() as tmp:
-            energy = self._zone(Path(tmp))
-            os.chmod(energy, 0)
-            with patch.object(drm, "_intel_rapl_zone", return_value=(energy, 10_000_000)):
-                self.assertIsNone(drm._intel_rapl_w(now=0.0))
-                self.assertEqual(drm._INTEL_RAPL_FAIL, "denied")
+        # No filesystem fixture: the zone path is patched in, so this runs everywhere.
+        with patch.object(drm, "_intel_rapl_zone", return_value=("/no/energy_uj", 10_000_000)), \
+                patch("builtins.open", side_effect=PermissionError(13, "Permission denied")):
+            self.assertIsNone(drm._intel_rapl_w(now=0.0))
+            self.assertEqual(drm._INTEL_RAPL_FAIL, "denied")
 
     @unittest.skipIf(sys.platform == "win32", "powercap sysfs names contain a colon")
     def test_unparseable_zone_reports_missing(self):
