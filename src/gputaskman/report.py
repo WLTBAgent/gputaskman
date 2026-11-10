@@ -289,7 +289,8 @@ def to_text(s: Snapshot, limit: int = 30) -> str:
         if p.llm.server:
             sv = p.llm.server
             out.append(f"   server: {sv.kind} {sv.url} ctx={sv.n_ctx} slots={sv.slots_busy}/{sv.slots_total}"
-                       + (f" gen={sv.gen_tok_s:.1f} tok/s" if sv.gen_tok_s is not None else ""))
+                       + (f" gen={sv.gen_tok_s:.1f} tok/s" if sv.gen_tok_s is not None else "")
+                       + ("" if (sv.slots_busy or sv.gen_tok_s is not None) else " (idle)"))
             if p.llm.server_source == "parent":
                 out.append("   server source: parent process (API report, not worker residency)")
             if sv.kind in ("vllm", "foundry-local"):

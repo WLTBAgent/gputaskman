@@ -886,7 +886,10 @@ class GpuTaskManager(App):
                 if sv.n_ctx:
                     st.append(f"  ctx {sv.n_ctx:,}")
                 if sv.slots_total is not None:
-                    st.append(f"  slots busy {sv.slots_busy}/{sv.slots_total}")
+                    if not sv.slots_busy and not sv.gen_tok_s:
+                        st.append(f"  slots idle {sv.slots_busy}/{sv.slots_total}")
+                    else:
+                        st.append(f"  slots busy {sv.slots_busy}/{sv.slots_total}")
                 if sv.gen_tok_s:
                     st.append(f"  gen {sv.gen_tok_s:.1f} tok/s", style="bold green")
                 if sv.prompt_tok_s:
