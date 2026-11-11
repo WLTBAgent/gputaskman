@@ -26,6 +26,7 @@ def setUpModule() -> None:
 
 def tearDownModule() -> None:
     _no_drm.stop()
+    _no_ascend.stop()
 
 NOT_AVAILABLE = (1 << 64) - 1  # NVML_VALUE_NOT_AVAILABLE as an unsigned long long
 

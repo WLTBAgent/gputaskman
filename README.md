@@ -118,8 +118,8 @@ skips the consistency check, so do not use it after changing dependencies.
 
 Tagged releases include portable Linux builds: `gputaskman-VERSION-linux-x64.tar.gz` and
 `gputaskman-VERSION-linux-arm64.tar.gz`. They need glibc 2.35 or newer (Ubuntu 22.04, Debian 12,
-or newer) and an NVIDIA driver (or, on native Linux, an AMD GPU on the `amdgpu` driver or an Intel GPU on `i915`), and work
-natively, in containers, and in WSL:
+or newer) and an NVIDIA driver (or, on native Linux, an AMD GPU on the `amdgpu` driver, an Intel GPU on `i915`,
+or a Huawei Ascend 310P with `npu-smi`). NVIDIA works natively, in containers, and in WSL:
 
 ```bash
 tar -xzf gputaskman-VERSION-linux-x64.tar.gz
@@ -136,6 +136,13 @@ uv run --locked gputaskman
 ```
 
 What can be measured depends on where it runs, and the UI says which mode it is in.
+
+On native Linux, Ascend chips are listed individually. Their device memory and per-process memory
+come from `npu-smi`; AI-core and memory-bandwidth activity come from its watch stream, not
+per-process engine counters. Memory refreshes every 10 seconds, and a failed refresh or stale watch
+is reported as unavailable. The contributor reported testing an Atlas 300I Duo with a vLLM
+workload; driver version and these subsequent fixes have not been independently validated on hardware.
+Ascend container and PID-namespace behavior is not validated.
 
 | | Native Linux | WSL, interop on (default) | WSL, interop off or `--no-host` |
 |---|---|---|---|
@@ -855,6 +862,7 @@ Identification is designed to stay cheap. Measured on one Windows machine:
 | vLLM `/v1/models` | 1.32 ms median, 21.36 ms max in 30 loopback fixture GETs; cached lookup ~0.0004 ms (Windows 11 build 28000, ARM64; no vLLM runtime/GPU workload) | One GET, 0.5 s timeout and 4 MiB response cap; success cached 3 s, misses/401 cached 30 s. No redirects; actual Linux/vLLM latency unmeasured |
 | `psutil.open_files()` | 0.6-2.5 s per process | Never |
 | AMD and Intel on Linux: DRM fdinfo scan (`readlink` every fd, read fdinfo of `/dev/dri` ones) | ~9 ms for ~8,000 fds (AMD, Linux desktop; Intel not measured) | Every refresh, only when an amdgpu or Intel card is shown; listing fds is bounded to 50 ms in the TUI and resumes next refresh, known GPU fds are still read |
+| Ascend on Linux: `npu-smi` | Contributor reports ~0.5 s per command on an Atlas 300I Duo; not independently measured | Discovery is cached for 120 s. Each selected chip runs one `info` and one `proc-mem` command every 10 s and owns a watch process; multiple selected chips add their synchronous command costs |
 | macOS: `ioreg` device stats + Metal clients | ~10 ms | Every refresh |
 | macOS: memory-map scan (`proc_pidinfo` region walk) | ~4 ms per process | Same policy as the memory-map scan above |
 | macOS: `footprint` GPU memory | ~70 ms per process, background thread | Busy and new processes every ~2 s, idle ones every 30 s (54 runs in 40 s with 27 GPU processes, M4 Mac mini) |

@@ -78,13 +78,10 @@ def enumerate_adapters() -> list[Adapter]:
         seen = {a.luid for a in out}
         out += [a for a in drm.adapters(drm.cards()) if a.luid not in seen]
         # Ascend NPUs (no DRM): dual-chip cards yield one adapter per chip.
-        try:
-            from . import ascend
+        from . import ascend
 
-            seen |= {a.luid for a in out}
-            out += [a for a in ascend.cached_chips_adapters() if a.luid not in seen]
-        except Exception:
-            pass  # no npu-smi: the backend is simply absent
+        seen |= {a.luid for a in out}
+        out += [a for a in ascend.cached_chips_adapters() if a.luid not in seen]
     return out
 
 
@@ -244,15 +241,8 @@ class LinuxCounters:
 
             drm = DrmCounters()  # cheap: only lists cards; the Collector starts it if an AMD GPU is selected
             self.drm = drm if drm.ok else None
-        # Huawei Ascend NPUs (no DRM): npu-smi-based, own watch stream + slow proc-mem refresh.
+        # A Collector attaches an Ascend provider only when an Ascend chip is selected.
         self.ascend = None
-        if not self.wsl:
-            try:
-                from .ascend import AscendCounters
-
-                self.ascend = AscendCounters()
-            except Exception:
-                self.ascend = None
         if N is None:
             return
         try:
@@ -371,6 +361,8 @@ class LinuxCounters:
     def close(self) -> None:
         if self.drm is not None:
             self.drm.close()
+        if self.ascend is not None:
+            self.ascend.close()
         if self.ok:
             try:
                 N.nvmlShutdown()

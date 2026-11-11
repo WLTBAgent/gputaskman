@@ -128,6 +128,7 @@ class Snapshot:
     shared_is_spill: bool = True
     counter_status: str = ""  # Windows counter availability or adapter matching problem
     counter_adapter_matched: bool | None = None  # Windows PDH LUID matched the selected DXGI adapter
+    process_memory_available: bool = True
     nv_lost: bool = False  # NVML faulted for this GPU after a disable/re-enable; restart restores it
     @property
     def host_data(self) -> bool:
@@ -135,7 +136,8 @@ class Snapshot:
 
     @property
     def attributed(self) -> int | None:
-        if self.counter_adapter_matched is False or any("dedicated" not in p.gpu.available for p in self.procs):
+        if not self.process_memory_available or self.counter_adapter_matched is False or any(
+                "dedicated" not in p.gpu.available for p in self.procs):
             return None
         return int(sum(p.gpu.dedicated for p in self.procs))
 
@@ -204,7 +206,7 @@ class Collector:
 
     @property
     def backend(self) -> str:
-        if self.ascend_chip is not None:
+        if BACKEND == "nvml" and self.adapter and self.adapter.vendor_id == VENDOR_HUAWEI:
             return "ascend"  # Huawei NPU: npu-smi is the source, not NVML/DRM
         return "drm" if self.drm_card is not None else BACKEND
 
@@ -234,18 +236,19 @@ class Collector:
             drm.start()  # engine baseline over every process
             if scan_budget is None:
                 drm.scan_budget = None  # one-shot output sees every process
-        # Huawei Ascend NPU (no DRM): per-chip processes from npu-smi, live metrics from a
-        # `npu-smi info watch` stream. Owned by LinuxCounters (one watch stream for all chips).
+        # Huawei Ascend NPU (no DRM): one selected chip and its owned watch process.
         self.ascend_chip = None
         self.ascend = None
-        if (BACKEND == "posix" or sys.platform == "linux") and self.adapter \
-                and self.adapter.vendor_id == VENDOR_HUAWEI:
-            asc = getattr(self.counters, "ascend", None)
-            if asc is not None and asc.ok:
-                self.ascend = asc
-                self.ascend_chip = next(
-                    (c for c in asc.chips
-                     if (asc.chip_key(c.pdev) << 8) | c.chip == self.adapter.luid), None)
+        if BACKEND == "nvml" and self.adapter and self.adapter.vendor_id == VENDOR_HUAWEI:
+            from dataclasses import replace
+            from .ascend import AscendCounters, cached_chips
+
+            chip = next((c for c in cached_chips()
+                         if (AscendCounters.chip_key(c.pdev) << 8) | c.chip == self.adapter.luid), None)
+            if chip is not None:
+                self.ascend_chip = replace(chip)
+                self.ascend = AscendCounters(chips=[self.ascend_chip])
+                self.counters.ascend = self.ascend
         self.inspector = ProcInspector()
         self.prober = ServerProber()
         self.scan_budget = scan_budget  # None = scan every candidate now (one-shot output)
@@ -326,11 +329,11 @@ class Collector:
             from .drm import read_device
 
             nv = read_device(self.drm_card, self.gpu_index)
+        elif self.ascend_chip is not None:
+            nv = self.ascend.read_device(self.ascend_chip, self.gpu_index)
         elif self.adapter and self.adapter.vendor_id != VENDOR_NVIDIA:
             # NVML can't describe this GPU, and a sweep of every NVIDIA device costs ~60 ms per device.
             nv = (self.adl.sample() or self.amdsmi.sample()) if self.adapter.vendor_id == VENDOR_AMD else None
-        elif self.ascend_chip is not None:
-            nv = self.ascend.read_device(self.ascend_chip, self.gpu_index)
         else:
             nvs = self.nvml.sample() if self.nvml.ok else []
             nv = select_nv_device(self.adapter, nvs, self.gpu_index, self.adapters)
@@ -366,6 +369,12 @@ class Collector:
             snap.counter_status = " ".join(filter(None, (snap.counter_status, self.adapter.identity_status)))
         if self.drm_card is not None:
             snap.process_status = self.counters.drm.status
+        if self.ascend is not None:
+            snap.process_memory_available = self.ascend.process_available
+            snap.counter_status = self.ascend.status
+        elif self.backend == "ascend":
+            snap.process_memory_available = False
+            snap.counter_status = "Ascend chip unavailable: npu-smi could not match the selected adapter"
         live = [(pid, g) for pid, g in procs.items() if _is_live(g)]
         live.sort(key=lambda x: -(x[1].shown_vram or 0))
         for pid, g in live:
