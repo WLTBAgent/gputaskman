@@ -37,6 +37,10 @@ class AscendTests(unittest.TestCase):
         self.assertEqual([r["bus"] for r in rows], ["0000:0a:00.0", "0000:0b:00.0"])
         self.assertIsNone(rows[0]["aicore"])
 
+    def test_chip_keys_do_not_collide_with_other_pci_devices(self):
+        self.assertNotEqual(ascend.chip_adapter_key("0000:0a:00.0", 0),
+                            linux.pci_key("000a:00:00.0"))
+
     def test_per_chip_attribution_never_combines_or_copies_other_chip(self):
         def run(args):
             if args == ["info"]:

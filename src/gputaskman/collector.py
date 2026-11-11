@@ -126,7 +126,8 @@ class Snapshot:
     wsl_split: str = ""  # WSL only: why Linux rows have no (inferred) VRAM, when they don't
     # False on an APU (amdgpu iGPU): its GTT is ordinary GPU memory, not spill from a full VRAM.
     shared_is_spill: bool = True
-    counter_status: str = ""  # Windows counter availability or adapter matching problem
+    counter_status: str = ""  # Windows counter availability or adapter matching problem;
+    # Intel DRM privilege explanation (needs root) when its load/video/power are N/A
     counter_adapter_matched: bool | None = None  # Windows PDH LUID matched the selected DXGI adapter
     process_memory_available: bool = True
     nv_lost: bool = False  # NVML faulted for this GPU after a disable/re-enable; restart restores it
@@ -201,7 +202,7 @@ class Collector:
     _mac_driver = ""  # "macOS 26.3.1" on the metal backend, read once at startup
     SCAN_BUDGET = 0.15  # seconds of memory-map scanning per sample; leftovers wait for the next sample
     drm_card = None  # the selected GPU's AMD or Intel card, when it is one (drm.DrmCard)
-    ascend = None  # AscendCounters, when LinuxCounters owns one (shared watch stream)
+    ascend = None  # AscendCounters, when LinuxCounters owns one
     ascend_chip = None  # the selected GPU's Ascend chip, when it is one (ascend.AscendChip)
 
     @property
@@ -229,11 +230,12 @@ class Collector:
         # partial and get their fdinfo-derived used-memory stamp), processes from DRM fdinfo.
         drm = getattr(self.counters, "drm", None)
         if drm is not None and self.adapter and self.adapter.vendor_id != VENDOR_NVIDIA:
-            self.drm_card = next((c for c in drm.cards if c.key == self.adapter.luid), None)
+            self.drm_card = next((c for c in drm.cards if c.key == self.adapter.luid
+                                  and c.vendor_id == self.adapter.vendor_id), None)
         if drm is not None and self.drm_card is None:
             self.counters.drm = None  # an NVIDIA GPU is shown: don't walk every process's fds for nothing
         elif drm is not None:
-            drm.start()  # engine baseline over every process
+            drm.start(self.drm_card)  # process baseline plus device counters for the selected GPU only
             if scan_budget is None:
                 drm.scan_budget = None  # one-shot output sees every process
         # Huawei Ascend NPU (no DRM): one selected chip and its owned watch process.
@@ -241,10 +243,10 @@ class Collector:
         self.ascend = None
         if BACKEND == "nvml" and self.adapter and self.adapter.vendor_id == VENDOR_HUAWEI:
             from dataclasses import replace
-            from .ascend import AscendCounters, cached_chips
+            from .ascend import AscendCounters, cached_chips, chip_adapter_key
 
             chip = next((c for c in cached_chips()
-                         if (AscendCounters.chip_key(c.pdev) << 8) | c.chip == self.adapter.luid), None)
+                         if chip_adapter_key(c.pdev, c.chip) == self.adapter.luid), None)
             if chip is not None:
                 self.ascend_chip = replace(chip)
                 self.ascend = AscendCounters(chips=[self.ascend_chip])
@@ -369,6 +371,10 @@ class Collector:
             snap.counter_status = " ".join(filter(None, (snap.counter_status, self.adapter.identity_status)))
         if self.drm_card is not None:
             snap.process_status = self.counters.drm.status
+            if self.drm_card.intel and nv is not None:
+                from .drm import intel_counter_status
+
+                snap.counter_status = intel_counter_status(self.drm_card, nv)
         if self.ascend is not None:
             snap.process_memory_available = self.ascend.process_available
             snap.counter_status = self.ascend.status

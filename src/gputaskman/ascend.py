@@ -136,6 +136,11 @@ def _pci_key(pdev: str) -> int:
     return int(re.sub(r"[^0-9a-f]", "", pdev.lower()) or "0", 16)
 
 
+def chip_adapter_key(pdev: str, chip: int) -> int:
+    # Keep Ascend's PCI-plus-chip keys distinct from ordinary Linux PCI keys.
+    return (1 << 63) | (_pci_key(pdev) << 8) | chip
+
+
 def probe() -> list[AscendChip]:
     """Enumerate every Ascend chip npu-smi can see (two subprocess calls, ~1s)."""
     if _npu_path() is None:
@@ -177,7 +182,7 @@ class AscendCounters:
         self.ok = False
         self.chips = chips if chips is not None else probe()
         self.ok = bool(self.chips)
-        self.by_key = {(_pci_key(c.pdev) << 8) | c.chip: c for c in self.chips}
+        self.by_key = {chip_adapter_key(c.pdev, c.chip): c for c in self.chips}
         self._watch: dict[tuple[int, int], tuple[float, dict]] = {}
         self._lock = threading.Lock()
         self._last_proc = float("-inf")
@@ -195,8 +200,6 @@ class AscendCounters:
         return [Adapter(luid=key, name=c.name, vendor_id=VENDOR_HUAWEI,
                         dedicated_vram=c.mem_total, shared_system=0, software=False)
                 for key, c in self.by_key.items()]
-
-    chip_key = staticmethod(_pci_key)  # exposed so the Collector can match adapter keys
 
     def start(self) -> None:
         """Start or retry the watch process without leaving an unowned child."""
@@ -246,7 +249,7 @@ class AscendCounters:
             self._last_info = now
             try:
                 rows = parse_info(_run(["info"]))
-                by_key = {(_pci_key(c["bus"]) << 8) | c["chip"]: c for c in rows}
+                by_key = {chip_adapter_key(c["bus"], c["chip"]): c for c in rows}
                 for key, chip in self.by_key.items():
                     c = by_key.get(key)
                     chip.mem_used = c["mem_used"] * _MB if c and c["mem_used"] is not None else None

@@ -584,6 +584,8 @@ class GpuTaskManager(App):
             m.append(f"  PCIe↓{format_metric(rx, '.0f'):>5} ↑{format_metric(tx, '.0f'):>4} MB/s")
             if nv.enc or nv.dec:
                 m.append(f"  enc {format_metric(nv.enc, unit='%')} dec {format_metric(nv.dec, unit='%')}")
+            if nv.video is not None:
+                m.append(f"  video {format_metric(nv.video, unit='%')}")
             lines.append(m)
             clock_label = (f"gfx {format_metric(nv.gfx_clock)} MHz" if is_amd else
                            f"GT {format_metric(nv.sm_clock)}/{format_metric(nv.sm_clock_max)} MHz" if is_intel else
