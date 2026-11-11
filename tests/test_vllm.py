@@ -102,8 +102,8 @@ class VllmTests(unittest.TestCase):
             ["--nnodes", "1"], ["--nnodes=1"], ["-n", "1"], ["-n=1"],
             ["--data_parallel_size", "1"], ["--api_server_count=1"], ["--distributed_executor_backend", "mp"],
             ["--tensor-parallel-size", "2"], ["-tp", "2"],
-            # PP is intentionally unchanged pending maintainer guidance.
-            ["--pipeline-parallel-size", "2"], ["-pp", "2"],
+            ["--pipeline-parallel-size", "1"], ["--pipeline-parallel-size=1"], ["-pp", "1"], ["-pp=1"],
+            ["--pipeline_parallel_size=1"],
             ["--data-parallel-size=1", "--api-server-count=1", "--distributed-executor-backend=mp"],
         ]
         rejected = [
@@ -121,8 +121,11 @@ class VllmTests(unittest.TestCase):
             ["--node_rank", "0"], ["--data_parallel_rank=0"],
             ["--api-server", "2"], ["--nnode", "2"], ["--distributed-executor", "ray"], ["--head"],
             ["--conf", "launch.yaml"], ["--node-r", "0"],
+            ["--pipeline-parallel-size", "2"], ["--pipeline-parallel-size=2"],
+            ["-pp", "2"], ["-pp=2"], ["-pp2"],
+            ["--pipeline-parallel", "1"], ["--pipeline-parallel=1"],
             ["--data-parallel-size"], ["-dp"], ["--api-server-count"],
-            ["--distributed-executor-backend"], ["--nnodes"],
+            ["--distributed-executor-backend"], ["--nnodes"], ["--pipeline-parallel-size"],
             ["--data-parallel-size", "--api-server-count", "1"],
             ["--data-parallel-size=1", "--config", "launch.yaml"],
             ["-dp", "2", "--api-server-count", "1"],

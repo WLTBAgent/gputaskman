@@ -159,7 +159,8 @@ class ProcDetail:
         # Explicit single-node values are allowed. A --config path belongs to another process and is
         # never opened, so any layout it could hide stays ambiguous. Aliases: vllm/engine/arg_utils.py.
         single = {"--data-parallel-size": "1", "-dp": "1", "--api-server-count": "1", "--nnodes": "1",
-                  "-n": "1", "--distributed-executor-backend": "mp"}
+                  "-n": "1", "--distributed-executor-backend": "mp", "--pipeline-parallel-size": "1",
+                  "-pp": "1"}
         watched = ("--config", "--headless", "--node-rank", *(f for f in single if f.startswith("--")))
         cmd = self.cmdline
         for i, arg in enumerate(cmd):
@@ -171,6 +172,7 @@ class ProcDetail:
             if (flag in ("--config", "--headless", "--node-rank")
                     or (flag.startswith("--data-parallel") and flag != "--data-parallel-size")
                     or (flag.startswith("-dp") and flag != "-dp")
+                    or (flag.startswith("-pp") and flag != "-pp")
                     or (flag.startswith("-n") and flag != "-n")
                     or flag.startswith("-r")):
                 return True
