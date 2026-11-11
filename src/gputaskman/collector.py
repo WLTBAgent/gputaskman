@@ -126,7 +126,8 @@ class Snapshot:
     wsl_split: str = ""  # WSL only: why Linux rows have no (inferred) VRAM, when they don't
     # False on an APU (amdgpu iGPU): its GTT is ordinary GPU memory, not spill from a full VRAM.
     shared_is_spill: bool = True
-    counter_status: str = ""  # Windows counter availability or adapter matching problem
+    counter_status: str = ""  # Windows counter availability or adapter matching problem;
+    # Intel DRM privilege explanation (needs root) when its load/video/power are N/A
     counter_adapter_matched: bool | None = None  # Windows PDH LUID matched the selected DXGI adapter
     nv_lost: bool = False  # NVML faulted for this GPU after a disable/re-enable; restart restores it
     @property
@@ -227,7 +228,7 @@ class Collector:
         if drm is not None and self.drm_card is None:
             self.counters.drm = None  # an NVIDIA GPU is shown: don't walk every process's fds for nothing
         elif drm is not None:
-            drm.start()  # engine baseline over every process
+            drm.start(self.drm_card)  # process baseline plus device counters for the selected GPU only
             if scan_budget is None:
                 drm.scan_budget = None  # one-shot output sees every process
         self.inspector = ProcInspector()
@@ -348,6 +349,10 @@ class Collector:
             snap.counter_status = " ".join(filter(None, (snap.counter_status, self.adapter.identity_status)))
         if self.drm_card is not None:
             snap.process_status = self.counters.drm.status
+            if self.drm_card.intel and nv is not None:
+                from .drm import intel_counter_status
+
+                snap.counter_status = intel_counter_status(self.drm_card, nv)
         live = [(pid, g) for pid, g in procs.items() if _is_live(g)]
         live.sort(key=lambda x: -(x[1].shown_vram or 0))
         for pid, g in live:
