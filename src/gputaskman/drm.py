@@ -18,7 +18,7 @@ import re
 import struct
 import time
 from bisect import bisect_left
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 
 from .dxgi import VENDORS, Adapter
@@ -69,6 +69,7 @@ class DrmCard:
     # clients' resident bytes (local bytes on a discrete card, system bytes on an integrated one;
     # shared buffers can double-count); None = no readable client, unknown.
     vram_used: int | None = None
+    pmu_state: dict = field(default_factory=dict, repr=False)
 
 
 def _read(path: str) -> str | None:
@@ -582,7 +583,6 @@ _INTEL_ENERGY_STATE: dict[str, tuple[int, float]] = {}  # hwmon path -> (last uJ
 # never be opened records why ("denied", "missing" or "shared") instead of retrying a failing syscall
 # every refresh; RAPL failures are cached the same way. See intel_counter_status for what each means.
 _PERF_NR = {"x86_64": 298, "aarch64": 241}  # __NR_perf_event_open
-_INTEL_PMU_STATE: dict[str, dict] = {}  # card sysfs dir -> {"fds", "prev", "fail"}
 _INTEL_RAPL_PREV: dict[str, tuple[int, float]] = {}  # energy_uj path -> (last uJ, last read time)
 _INTEL_RAPL_FAIL: str | None = None  # why the uncore zone can't be read: denied, missing, or None
 
@@ -666,11 +666,9 @@ def _intel_pmu_rates(card: DrmCard, now: int | None = None) -> tuple[float | Non
     back re-arms it instead of reporting a negative load."""
     if now is None:
         now = time.monotonic_ns()
-    sysfs = card.sysfs
-    state = _INTEL_PMU_STATE.get(sysfs)
-    if state is None:
-        state = {"fds": {}, "prev": {}, "fail": None}
-        _INTEL_PMU_STATE[sysfs] = state
+    state = card.pmu_state
+    if not state:
+        state.update(fds={}, prev={}, fail=None)
         spec = _intel_pmu_spec(_intel_pmu_path(card))
         if spec is None:
             state["fail"] = "missing"
@@ -702,7 +700,7 @@ def _intel_pmu_rates(card: DrmCard, now: int | None = None) -> tuple[float | Non
                     os.close(open_fd)
                 except OSError:
                     pass
-            del _INTEL_PMU_STATE[sysfs]  # transient: a fresh attempt next sample
+            state.clear()  # transient: a fresh attempt next sample
             return None, None
         prev = state["prev"].get(kind)
         state["prev"][kind] = (value, now)
@@ -787,7 +785,7 @@ def intel_counter_status(card: DrmCard, nv=None) -> str:
     which source actually served power, so a working hwmon sensor is never blamed on RAPL."""
     if not card.intel:
         return ""
-    pmu_fail = _INTEL_PMU_STATE.get(card.sysfs, {}).get("fail")
+    pmu_fail = card.pmu_state.get("fail")
     if pmu_fail is None and _INTEL_RAPL_FAIL is None:
         return ""
     parts = []
@@ -898,7 +896,7 @@ class DrmCounters:
             path = pmu_paths[card.sysfs]
             if path is not None and list(pmu_paths.values()).count(path) > 1:
                 # Only a genuinely shared PMU is ambiguous; discrete PMUs are named by PCI address.
-                _INTEL_PMU_STATE.setdefault(card.sysfs, {"fds": {}, "prev": {}, "fail": "shared"})
+                card.pmu_state.update(fds={}, prev={}, fail="shared")
                 continue
             # Arm the load baseline too: --once sleeps a second after Collector init,
             # so its single sample is already a rate over a real interval.
@@ -1178,11 +1176,11 @@ class DrmCounters:
         return procs, adapters
 
     def close(self) -> None:
-        """Close any open Intel PMU file descriptors."""
-        for sysfs in list(_INTEL_PMU_STATE):
-            for fd in _INTEL_PMU_STATE[sysfs].get("fds", {}).values():
+        """Close this collector's Intel PMU file descriptors, leaving other collectors alone."""
+        for card in self.cards:
+            for fd in card.pmu_state.get("fds", {}).values():
                 try:
                     os.close(fd)
                 except OSError:
                     pass
-            del _INTEL_PMU_STATE[sysfs]
+            card.pmu_state.clear()

@@ -1533,7 +1533,6 @@ class IntelPmuTests(unittest.TestCase):
     """Whole-GPU load from the i915 performance counters, against a fake PMU sysfs tree."""
 
     def setUp(self):
-        drm._INTEL_PMU_STATE.clear()
         self.card = drm.DrmCard(key=32, pdev="0000:00:02.0", sysfs="/x/card1/device",
                                 driver="i915", vendor_id=0x8086, device_id=0xA7AD, name="Intel Graphics",
                                 vram_total=0, integrated=True, intel=True)
@@ -1566,7 +1565,7 @@ class IntelPmuTests(unittest.TestCase):
         events = ("rcs0-busy", "ccs0-busy", "bcs1-busy", "vcs0-busy", "vcs1-busy", "vecs1-busy")
         for active in ("ccs0", "bcs1", "vcs1", "vecs1"):
             with self.subTest(active=active), tempfile.TemporaryDirectory() as tmp:
-                drm._INTEL_PMU_STATE.clear()
+                self.card.pmu_state.clear()
                 root = Path(tmp)
                 self._pmu(root, events=events)
                 values = {}
@@ -1639,6 +1638,47 @@ class IntelPmuTests(unittest.TestCase):
                 counters.close()
                 self.assertCountEqual([c.args[0] for c in closed.call_args_list], [28, 29])
 
+    def test_collectors_keep_same_device_baselines_and_handles_independent(self):
+        a = self.card
+        b = drm.DrmCard(key=a.key, pdev=a.pdev, sysfs=a.sysfs, driver=a.driver,
+                                vendor_id=a.vendor_id, device_id=a.device_id, name=a.name,
+                                vram_total=a.vram_total, integrated=a.integrated, intel=True)
+        first, second = drm.DrmCounters(found=[a]), drm.DrmCounters(found=[b])
+        values = {101: 0, 102: 0}
+        with patch.object(drm, "_intel_pmu_spec", return_value=(28, 0, {"ccs0": 0})), \
+                patch.object(drm, "_perf_open", side_effect=[(101, None), (102, None)]) as opened, \
+                patch.object(drm, "_read_counter", side_effect=lambda fd: values[fd]), \
+                patch.object(drm.os, "close") as closed:
+            drm._intel_pmu_rates(a, now=0)
+            drm._intel_pmu_rates(b, now=0)
+            values.update({101: 200_000_000, 102: 800_000_000})
+            self.assertEqual(drm._intel_pmu_rates(a, now=1_000_000_000), (20.0, None))
+            self.assertEqual(drm._intel_pmu_rates(b, now=1_000_000_000), (80.0, None))
+            first.close()
+            first.close()
+            closed.assert_called_once_with(101)
+            values[102] = 1_300_000_000
+            self.assertEqual(drm._intel_pmu_rates(b, now=2_000_000_000), (50.0, None))
+            self.assertEqual(opened.call_count, 2)
+            second.close()
+            self.assertEqual([call.args[0] for call in closed.call_args_list], [101, 102])
+
+    def test_failed_counter_closes_only_its_own_handles_and_retries(self):
+        other = drm.DrmCard(key=2, pdev="0000:03:00.0", sysfs="/x/card2/device", driver="i915",
+                                    vendor_id=0x8086, device_id=1, name="Intel", vram_total=16 * GiB,
+                                    integrated=False, intel=True)
+        with patch.object(drm, "_intel_pmu_spec", return_value=(28, 0, {"vcs1": 0})), \
+                patch.object(drm, "_perf_open", side_effect=[(101, None), (102, None), (103, None)]), \
+                patch.object(drm, "_read_counter", side_effect=[0, 0, None, 900_000_000, 0]), \
+                patch.object(drm.os, "close") as closed:
+            drm._intel_pmu_rates(self.card, now=0)
+            drm._intel_pmu_rates(other, now=0)
+            self.assertEqual(drm._intel_pmu_rates(self.card, now=1_000_000_000), (None, None))
+            closed.assert_called_once_with(101)
+            self.assertEqual(drm._intel_pmu_rates(other, now=1_000_000_000), (90.0, 90.0))
+            self.assertEqual(drm._intel_pmu_rates(self.card, now=2_000_000_000), (None, None))
+            self.assertEqual(self.card.pmu_state["fds"], {"vcs1": 103})
+
     def test_rates_need_two_samples(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1650,7 +1690,7 @@ class IntelPmuTests(unittest.TestCase):
                 self.assertEqual(opened.call_count, 2)
                 self.assertEqual(drm._intel_pmu_rates(self.card, now=1_000_000_000), (50.0, None))
                 # "copy" is not video; with no video engine the video figure stays unknown
-                self.assertEqual(drm._INTEL_PMU_STATE["/x/card1/device"]["fail"], None)
+                self.assertEqual(self.card.pmu_state["fail"], None)
 
     def test_video_is_the_video_engines_busy_share(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1682,12 +1722,12 @@ class IntelPmuTests(unittest.TestCase):
             with patch.object(drm, "_intel_pmu_spec", return_value=(28, 0, {"rcs0": 0})), \
                     patch.object(drm, "_perf_open", return_value=(None, "denied")):
                 self.assertEqual(drm._intel_pmu_rates(self.card), (None, None))
-                self.assertEqual(drm._INTEL_PMU_STATE["/x/card1/device"]["fail"], "denied")
+                self.assertEqual(self.card.pmu_state["fail"], "denied")
 
     def test_missing_spec_reports_missing(self):
         with patch.object(drm, "_intel_pmu_spec", return_value=None):
             self.assertEqual(drm._intel_pmu_rates(self.card), (None, None))
-            self.assertEqual(drm._INTEL_PMU_STATE["/x/card1/device"]["fail"], "missing")
+            self.assertEqual(self.card.pmu_state["fail"], "missing")
 
     def test_unsupported_arch_reports_missing_not_denied(self):
         with patch.object(drm.platform, "machine", return_value="riscv"), \
@@ -1717,8 +1757,8 @@ class IntelPmuTests(unittest.TestCase):
                     patch.object(drm, "_intel_rapl_w"), patch.object(drm, "_perf_open") as opened:
                 counters.start()
             opened.assert_not_called()
-            self.assertEqual(drm._INTEL_PMU_STATE[str(Path(tmp) / "a")]["fail"], "shared")
-            self.assertEqual(drm._INTEL_PMU_STATE[str(Path(tmp) / "b")]["fail"], "shared")
+            self.assertEqual(a.pmu_state["fail"], "shared")
+            self.assertEqual(b.pmu_state["fail"], "shared")
 
 
 class IntelRaplTests(unittest.TestCase):
@@ -1809,7 +1849,6 @@ class IntelCounterStatusTests(unittest.TestCase):
                            vram_total=0, integrated=integrated, intel=True)
 
     def setUp(self):
-        drm._INTEL_PMU_STATE.clear()
         drm._INTEL_RAPL_PREV.clear()
         drm._INTEL_RAPL_FAIL = None
 
@@ -1820,18 +1859,20 @@ class IntelCounterStatusTests(unittest.TestCase):
         self.assertEqual(drm.intel_counter_status(card, None), "")
 
     def test_denied_names_privileges(self):
-        drm._INTEL_PMU_STATE["/x/card1/device"] = {"fail": "denied"}
+        card = self._card()
+        card.pmu_state["fail"] = "denied"
         drm._INTEL_RAPL_FAIL = "denied"
         with patch.object(drm, "_read", return_value="2"):
-            status = drm.intel_counter_status(self._card(), None)
+            status = drm.intel_counter_status(card, None)
         self.assertIn("perf_event_paranoid=2", status)
         self.assertIn("root", status)
         self.assertIn("unknown, not zero", status)
 
     def test_missing_names_the_gap(self):
-        drm._INTEL_PMU_STATE["/x/card1/device"] = {"fail": "missing"}
+        card = self._card()
+        card.pmu_state["fail"] = "missing"
         drm._INTEL_RAPL_FAIL = "missing"
-        status = drm.intel_counter_status(self._card(), None)
+        status = drm.intel_counter_status(card, None)
         self.assertIn("performance counters", status)
         self.assertIn("uncore", status)
 
@@ -1846,16 +1887,18 @@ class IntelCounterStatusTests(unittest.TestCase):
         self.assertEqual(drm.intel_counter_status(self._card(), None), "")
 
     def test_discrete_card_omits_rapl(self):
-        drm._INTEL_PMU_STATE["/x/card1/device"] = {"fail": "denied"}
+        card = self._card(integrated=False)
+        card.pmu_state["fail"] = "denied"
         drm._INTEL_RAPL_FAIL = "denied"
         with patch.object(drm, "_read", return_value="2"):
-            status = drm.intel_counter_status(self._card(integrated=False), None)
+            status = drm.intel_counter_status(card, None)
         self.assertIn("load", status)
         self.assertNotIn("RAPL", status)
 
     def test_shared_pmu_is_refused(self):
-        drm._INTEL_PMU_STATE["/x/card1/device"] = {"fail": "shared"}
-        status = drm.intel_counter_status(self._card(), None)
+        card = self._card()
+        card.pmu_state["fail"] = "shared"
+        status = drm.intel_counter_status(card, None)
         self.assertIn("multiple Intel GPUs", status)
 
 
