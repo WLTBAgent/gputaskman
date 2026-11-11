@@ -520,7 +520,7 @@ def read_device(card: DrmCard, index: int) -> DeviceTelemetry:
             dev.gfx_clock = cur
         dev.sm_clock_max = _int(os.path.join(gt, "rps_RP0_freq_mhz"))
         dev.throttle = _intel_throttle(gt)
-        util, video = _intel_pmu_rates(d)
+        util, video = _intel_pmu_rates(card)
         dev.util_gpu = util
         dev.video = video
         if dev.power_w is None and card.integrated:
@@ -582,8 +582,6 @@ _INTEL_ENERGY_STATE: dict[str, tuple[int, float]] = {}  # hwmon path -> (last uJ
 # never be opened records why ("denied", "missing" or "shared") instead of retrying a failing syscall
 # every refresh; RAPL failures are cached the same way. See intel_counter_status for what each means.
 _PERF_NR = {"x86_64": 298, "aarch64": 241}  # __NR_perf_event_open
-_INTEL_PMU_ENGINES = (("render", "rcs0-busy"), ("copy", "bcs0-busy"),
-                      ("video", "vcs0-busy"), ("video-enhance", "vecs0-busy"))
 _INTEL_PMU_STATE: dict[str, dict] = {}  # card sysfs dir -> {"fds", "prev", "fail"}
 _INTEL_RAPL_PREV: dict[str, tuple[int, float]] = {}  # energy_uj path -> (last uJ, last read time)
 _INTEL_RAPL_FAIL: str | None = None  # why the uncore zone can't be read: denied, missing, or None
@@ -612,8 +610,21 @@ def _perf_open(pmu_type: int, config: int, cpu: int) -> tuple[int | None, str | 
     return None, ("denied" if err in (errno.EACCES, errno.EPERM) else "missing")
 
 
-def _intel_pmu_spec(pmu_root: str = "/sys/bus/event_source/devices/i915") -> tuple[int, int, dict[str, int]] | None:
-    """(PMU type, CPU, {engine kind: event config}) from the i915 PMU in sysfs; None when absent."""
+def _intel_pmu_path(card: DrmCard, root: str = "/sys/bus/event_source/devices") -> str | None:
+    """Bind the PCI-named discrete PMU, or the legacy integrated i915 PMU; never use i915 for xe."""
+    if card.driver != "i915":
+        return None
+    discrete = os.path.join(root, "i915_" + card.pdev.replace(":", "_"))
+    if os.path.isdir(discrete):
+        return discrete
+    integrated = os.path.join(root, "i915")
+    return integrated if card.integrated and os.path.isdir(integrated) else None
+
+
+def _intel_pmu_spec(pmu_root: str | None) -> tuple[int, int, dict[str, int]] | None:
+    """(PMU type, CPU, {engine instance: config}); None if any busy counter can't be decoded."""
+    if pmu_root is None:
+        return None
     root = pmu_root
     pmu_type = _int(os.path.join(root, "type"))
     mask = _read(os.path.join(root, "cpumask"))
@@ -623,15 +634,21 @@ def _intel_pmu_spec(pmu_root: str = "/sys/bus/event_source/devices/i915") -> tup
         cpu = int(re.split(r"[-,]", mask.strip())[0], 0)
     except ValueError:
         return None
+    try:
+        events = sorted(os.listdir(os.path.join(root, "events")))
+    except OSError:
+        return None
     configs = {}
-    for kind, event in _INTEL_PMU_ENGINES:
+    for event in events:
+        if not event.endswith("-busy"):
+            continue
         value = _read(os.path.join(root, "events", event))
         if not value or "=" not in value:
-            continue
+            return None
         try:
-            configs[kind] = int(value.split("=", 1)[1].strip(), 16)
+            configs[event[:-len("-busy")]] = int(value.split("=", 1)[1].strip(), 16)
         except ValueError:
-            continue
+            return None
     return (pmu_type, cpu, configs) if configs else None
 
 
@@ -643,17 +660,18 @@ def _read_counter(fd: int) -> int | None:
         return None
 
 
-def _intel_pmu_rates(sysfs: str, now: int | None = None) -> tuple[float | None, float | None]:
+def _intel_pmu_rates(card: DrmCard, now: int | None = None) -> tuple[float | None, float | None]:
     """Whole-GPU busy % (busiest engine) and video-engine busy % for an Intel card; (None, None) when
     unreadable. The first sample only arms the baseline (a rate needs an interval); a counter stepping
     back re-arms it instead of reporting a negative load."""
     if now is None:
         now = time.monotonic_ns()
+    sysfs = card.sysfs
     state = _INTEL_PMU_STATE.get(sysfs)
     if state is None:
         state = {"fds": {}, "prev": {}, "fail": None}
         _INTEL_PMU_STATE[sysfs] = state
-        spec = _intel_pmu_spec()
+        spec = _intel_pmu_spec(_intel_pmu_path(card))
         if spec is None:
             state["fail"] = "missing"
             return None, None
@@ -698,8 +716,10 @@ def _intel_pmu_rates(sysfs: str, now: int | None = None) -> tuple[float | None, 
         busy[kind] = min(100.0, delta * 100.0 / elapsed)
     if not busy:
         return None, None
-    video = max([v for k, v in busy.items() if k in ("video", "video-enhance")], default=None)
-    util = max(busy.values(), default=None)
+    video_engines = [k for k in state["fds"] if k.startswith(("vcs", "vecs"))]
+    video = (max((busy[k] for k in video_engines), default=None)
+             if all(k in busy for k in video_engines) else None)
+    util = max(busy.values()) if len(busy) == len(state["fds"]) else None
     return util, video
 
 
@@ -775,7 +795,7 @@ def intel_counter_status(card: DrmCard, nv=None) -> str:
         para = _read("/proc/sys/kernel/perf_event_paranoid") or "?"
         parts.append(f"GPU and video load need perf privileges this user lacks (perf_event_paranoid={para})")
     elif pmu_fail == "missing":
-        parts.append("no i915 performance counters on this kernel")
+        parts.append("no readable supported i915 performance counters for this GPU")
     elif pmu_fail == "shared":
         parts.append("performance counters can't attribute load with multiple Intel GPUs")
     hwmon_power = nv is not None and nv.power_kind == "Board"
@@ -873,16 +893,16 @@ class DrmCounters:
         for card in intel_cards:
             if card.integrated:
                 _intel_rapl_w()  # arm the power baseline; RAPL is package-global, unaffected by sharing
-        if len(intel_cards) > 1:
-            # One i915 PMU for the whole driver: its counters can't be attributed to either card,
-            # so neither gets device load instead of both showing the same numbers.
-            for card in intel_cards:
-                _INTEL_PMU_STATE.setdefault(card.sysfs, {"fds": {}, "prev": {}, "fail": "shared"})
-            return
+        pmu_paths = {card.sysfs: _intel_pmu_path(card) for card in intel_cards}
         for card in intel_cards:
+            path = pmu_paths[card.sysfs]
+            if path is not None and list(pmu_paths.values()).count(path) > 1:
+                # Only a genuinely shared PMU is ambiguous; discrete PMUs are named by PCI address.
+                _INTEL_PMU_STATE.setdefault(card.sysfs, {"fds": {}, "prev": {}, "fail": "shared"})
+                continue
             # Arm the load baseline too: --once sleeps a second after Collector init,
             # so its single sample is already a rate over a real interval.
-            _intel_pmu_rates(card.sysfs)
+            _intel_pmu_rates(card)
 
     def _adapters(self) -> dict[int, AdapterGpu]:
         out: dict[int, AdapterGpu] = {}

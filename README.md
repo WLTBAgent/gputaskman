@@ -256,6 +256,10 @@ Device memory bandwidth and the PCIe link are `n/a`: i915 has no device-wide ban
 sysfs link fields can report the power-on default instead of the live link. Device GPU load and video load
 come from the i915 performance counters and need root; power comes from RAPL's uncore zone on an integrated
 GPU and needs root too.
+The load readings sample every exposed `*-busy` engine instance, including compute and additional
+video/copy engines, and use the busiest instance rather than averaging across idle engines. Discrete
+PMUs are matched by PCI address (`i915_<PCI BDF>`); the legacy `i915` PMU is used only for an integrated
+card. If multiple cards resolve to the same PMU, their load stays `N/A` with an attribution reason.
 `xe` cards are detected, but its fdinfo uses other keys (`drm-cycles-*`, `drm-resident-vram0`/`-gtt`), so its
 per-process rows show `n/a` until they are decoded on hardware.
 
@@ -277,6 +281,8 @@ Live check of the root-only readings on the same machine (`intel_gpu_top` from i
 nearby window; scenes vary, and uncore is approximate while the CPU is active). A VA-API `ffmpeg` decode loop
 drives the video engine to 99.9% on both (`intel_gpu_top` Video 99.4-99.9%). Without root the three stay `N/A`
 with a reason, while the GT clock, throttle and per-process rows keep working.
+Per-PCI PMU selection and compute/secondary-engine coverage are regression-tested with synthetic
+counters, **not yet validated on hardware**; the live check above covers only the Vivobook's exercised engines.
 
 **WSL** is different, because Windows owns the GPU. Linux cannot see how much VRAM its own
 processes use: `nvidia-smi` lists no processes, NVML's per-process samples carry *Windows* PIDs
