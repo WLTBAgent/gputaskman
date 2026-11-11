@@ -1663,6 +1663,29 @@ class IntelPmuTests(unittest.TestCase):
             second.close()
             self.assertEqual([call.args[0] for call in closed.call_args_list], [101, 102])
 
+    def test_selected_amd_card_does_not_open_intel_device_counters(self):
+        amd = _card("/x/amd/device", "0000:01:00.0")
+        counters = drm.DrmCounters(found=[amd, self.card])
+        with patch.object(counters, "sample"), \
+                patch.object(drm, "_intel_pmu_rates") as pmu, \
+                patch.object(drm, "_intel_rapl_w") as rapl:
+            counters.start(amd)
+        pmu.assert_not_called()
+        rapl.assert_not_called()
+
+    def test_selected_intel_card_primes_only_its_own_device_counters(self):
+        other = drm.DrmCard(key=2, pdev="0000:03:00.0", sysfs="/x/card2/device", driver="i915",
+                            vendor_id=0x8086, device_id=1, name="Intel", vram_total=16 * GiB,
+                            integrated=False, intel=True)
+        counters = drm.DrmCounters(found=[self.card, other])
+        with patch.object(counters, "sample"), \
+                patch.object(drm, "_intel_pmu_path", side_effect=lambda c: c.sysfs), \
+                patch.object(drm, "_intel_pmu_rates") as pmu, \
+                patch.object(drm, "_intel_rapl_w") as rapl:
+            counters.start(other)
+        pmu.assert_called_once_with(other)
+        rapl.assert_not_called()
+
     def test_failed_counter_closes_only_its_own_handles_and_retries(self):
         other = drm.DrmCard(key=2, pdev="0000:03:00.0", sysfs="/x/card2/device", driver="i915",
                                     vendor_id=0x8086, device_id=1, name="Intel", vram_total=16 * GiB,

@@ -228,7 +228,7 @@ class Collector:
         if drm is not None and self.drm_card is None:
             self.counters.drm = None  # an NVIDIA GPU is shown: don't walk every process's fds for nothing
         elif drm is not None:
-            drm.start()  # engine baseline over every process
+            drm.start(self.drm_card)  # process baseline plus device counters for the selected GPU only
             if scan_budget is None:
                 drm.scan_budget = None  # one-shot output sees every process
         self.inspector = ProcInspector()

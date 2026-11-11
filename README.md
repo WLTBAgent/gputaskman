@@ -260,7 +260,8 @@ The load readings sample every exposed `*-busy` engine instance, including compu
 video/copy engines, and use the busiest instance rather than averaging across idle engines. Discrete
 PMUs are matched by PCI address (`i915_<PCI BDF>`); the legacy `i915` PMU is used only for an integrated
 card. If multiple cards resolve to the same PMU, their load stays `N/A` with an attribution reason.
-Each collector owns its counter handles and baselines; closing one does not reset another collector's readings.
+Each collector opens device counters only for its selected GPU and owns those handles and baselines;
+closing one does not reset another collector's readings.
 `xe` cards are detected, but its fdinfo uses other keys (`drm-cycles-*`, `drm-resident-vram0`/`-gtt`), so its
 per-process rows show `n/a` until they are decoded on hardware.
 

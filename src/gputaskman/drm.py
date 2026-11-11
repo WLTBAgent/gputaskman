@@ -880,7 +880,7 @@ class DrmCounters:
         self.partial = False  # the last scan ran out of budget, so a DRM client's holders may not all be known
         self.scan_budget: float | None = SCAN_BUDGET
 
-    def start(self) -> None:
+    def start(self, selected: DrmCard | None = None) -> None:
         """Take the engine baseline over every process, like the WDDM counters do at startup."""
         if not self.ok:
             return
@@ -888,11 +888,12 @@ class DrmCounters:
         self.sample()
         self.scan_budget = budget
         intel_cards = [c for c in self.cards if c.intel]
-        for card in intel_cards:
+        selected_intel = [c for c in intel_cards if selected is None or c is selected]
+        for card in selected_intel:
             if card.integrated:
                 _intel_rapl_w()  # arm the power baseline; RAPL is package-global, unaffected by sharing
         pmu_paths = {card.sysfs: _intel_pmu_path(card) for card in intel_cards}
-        for card in intel_cards:
+        for card in selected_intel:
             path = pmu_paths[card.sysfs]
             if path is not None and list(pmu_paths.values()).count(path) > 1:
                 # Only a genuinely shared PMU is ambiguous; discrete PMUs are named by PCI address.
